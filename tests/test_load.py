@@ -29,14 +29,11 @@ from datasets.features import Features, Image, Value
 from datasets.iterable_dataset import IterableDataset
 from datasets.load import (
     CachedDatasetModuleFactory,
-    CachedMetricModuleFactory,
-    GithubMetricModuleFactory,
     HubDatasetModuleFactoryWithoutScript,
     HubDatasetModuleFactoryWithParquetExport,
     HubDatasetModuleFactoryWithScript,
     LocalDatasetModuleFactoryWithoutScript,
     LocalDatasetModuleFactoryWithScript,
-    LocalMetricModuleFactory,
     PackagedDatasetModuleFactory,
     infer_module_for_data_files_list,
     infer_module_for_data_files_list_in_archives,
@@ -54,6 +51,7 @@ from .utils import (
     assert_arrow_memory_doesnt_increase,
     assert_arrow_memory_increases,
     offline,
+    require_moto,
     require_not_windows,
     require_pil,
     require_sndfile,
@@ -101,23 +99,6 @@ SAMPLE_DATASET_TWO_CONFIG_IN_METADATA_WITH_DEFAULT = (
     "hf-internal-testing/audiofolder_two_configs_in_metadata_with_default"
 )
 SAMPLE_DATASET_CAPITAL_LETTERS_IN_NAME = "hf-internal-testing/DatasetWithCapitalLetters"
-
-
-METRIC_LOADING_SCRIPT_NAME = "__dummy_metric1__"
-
-METRIC_LOADING_SCRIPT_CODE = """
-import datasets
-from datasets import MetricInfo, Features, Value
-
-
-class __DummyMetric1__(datasets.Metric):
-
-    def _info(self):
-        return MetricInfo(features=Features({"predictions": Value("int"), "references": Value("int")}))
-
-    def _compute(self, predictions, references):
-        return {"__dummy_metric1__": sum(int(p == r) for p, r in zip(predictions, references))}
-"""
 
 
 @pytest.fixture
@@ -327,17 +308,6 @@ def dataset_loading_script_dir_readonly(tmp_path):
     return dataset_loading_script_dir
 
 
-@pytest.fixture
-def metric_loading_script_dir(tmp_path):
-    script_name = METRIC_LOADING_SCRIPT_NAME
-    script_dir = tmp_path / script_name
-    script_dir.mkdir()
-    script_path = script_dir / f"{script_name}.py"
-    with open(script_path, "w") as f:
-        f.write(METRIC_LOADING_SCRIPT_CODE)
-    return str(script_dir)
-
-
 @pytest.mark.parametrize(
     "data_files, expected_module, expected_builder_kwargs",
     [
@@ -396,7 +366,6 @@ class ModuleFactoryTest(TestCase):
         data_dir_with_two_config_in_metadata,
         sub_data_dirs,
         dataset_loading_script_dir,
-        metric_loading_script_dir,
     ):
         self._jsonl_path = jsonl_path
         self._data_dir = data_dir
@@ -407,7 +376,6 @@ class ModuleFactoryTest(TestCase):
         self._data_dir2 = sub_data_dirs[0]
         self._sub_data_dir = sub_data_dirs[1]
         self._dataset_loading_script_dir = dataset_loading_script_dir
-        self._metric_loading_script_dir = metric_loading_script_dir
 
     def setUp(self):
         self.hf_modules_cache = tempfile.mkdtemp()
@@ -441,40 +409,19 @@ class ModuleFactoryTest(TestCase):
             download_config=self.download_config,
             dynamic_modules_path=self.dynamic_modules_path,
             revision="861aac88b2c6247dd93ade8b1c189ce714627750",
+            trust_remote_code=True,
         )
         module_factory_result = factory.get_module()
         assert importlib.import_module(module_factory_result.module_path) is not None
         assert module_factory_result.builder_kwargs["base_path"].startswith(config.HF_ENDPOINT)
 
-    def test_GithubMetricModuleFactory_with_internal_import(self):
-        # "squad_v2" requires additional imports (internal)
-        factory = GithubMetricModuleFactory(
-            "squad_v2", download_config=self.download_config, dynamic_modules_path=self.dynamic_modules_path
-        )
-        module_factory_result = factory.get_module()
-        assert importlib.import_module(module_factory_result.module_path) is not None
-
-    @pytest.mark.filterwarnings("ignore:GithubMetricModuleFactory is deprecated:FutureWarning")
-    def test_GithubMetricModuleFactory_with_external_import(self):
-        # "bleu" requires additional imports (external from github)
-        factory = GithubMetricModuleFactory(
-            "bleu", download_config=self.download_config, dynamic_modules_path=self.dynamic_modules_path
-        )
-        module_factory_result = factory.get_module()
-        assert importlib.import_module(module_factory_result.module_path) is not None
-
-    def test_LocalMetricModuleFactory(self):
-        path = os.path.join(self._metric_loading_script_dir, f"{METRIC_LOADING_SCRIPT_NAME}.py")
-        factory = LocalMetricModuleFactory(
-            path, download_config=self.download_config, dynamic_modules_path=self.dynamic_modules_path
-        )
-        module_factory_result = factory.get_module()
-        assert importlib.import_module(module_factory_result.module_path) is not None
-
     def test_LocalDatasetModuleFactoryWithScript(self):
         path = os.path.join(self._dataset_loading_script_dir, f"{DATASET_LOADING_SCRIPT_NAME}.py")
         factory = LocalDatasetModuleFactoryWithScript(
-            path, download_config=self.download_config, dynamic_modules_path=self.dynamic_modules_path
+            path,
+            download_config=self.download_config,
+            dynamic_modules_path=self.dynamic_modules_path,
+            trust_remote_code=True,
         )
         module_factory_result = factory.get_module()
         assert importlib.import_module(module_factory_result.module_path) is not None
@@ -485,8 +432,7 @@ class ModuleFactoryTest(TestCase):
         factory = LocalDatasetModuleFactoryWithScript(
             path, download_config=self.download_config, dynamic_modules_path=self.dynamic_modules_path
         )
-        with patch.object(config, "HF_DATASETS_TRUST_REMOTE_CODE", None):  # this will be the default soon
-            self.assertRaises(ValueError, factory.get_module)
+        self.assertRaises(ValueError, factory.get_module)
         factory = LocalDatasetModuleFactoryWithScript(
             path,
             download_config=self.download_config,
@@ -823,6 +769,7 @@ class ModuleFactoryTest(TestCase):
             SAMPLE_DATASET_IDENTIFIER,
             download_config=self.download_config,
             dynamic_modules_path=self.dynamic_modules_path,
+            trust_remote_code=True,
         )
         module_factory_result = factory.get_module()
         assert importlib.import_module(module_factory_result.module_path) is not None
@@ -882,7 +829,10 @@ class ModuleFactoryTest(TestCase):
     def test_CachedDatasetModuleFactory_with_script(self):
         path = os.path.join(self._dataset_loading_script_dir, f"{DATASET_LOADING_SCRIPT_NAME}.py")
         factory = LocalDatasetModuleFactoryWithScript(
-            path, download_config=self.download_config, dynamic_modules_path=self.dynamic_modules_path
+            path,
+            download_config=self.download_config,
+            dynamic_modules_path=self.dynamic_modules_path,
+            trust_remote_code=True,
         )
         module_factory_result = factory.get_module()
         for offline_mode in OfflineSimulationMode:
@@ -894,35 +844,15 @@ class ModuleFactoryTest(TestCase):
                 module_factory_result = factory.get_module()
                 assert importlib.import_module(module_factory_result.module_path) is not None
 
-    @pytest.mark.filterwarnings("ignore:LocalMetricModuleFactory is deprecated:FutureWarning")
-    @pytest.mark.filterwarnings("ignore:CachedMetricModuleFactory is deprecated:FutureWarning")
-    def test_CachedMetricModuleFactory(self):
-        path = os.path.join(self._metric_loading_script_dir, f"{METRIC_LOADING_SCRIPT_NAME}.py")
-        factory = LocalMetricModuleFactory(
-            path, download_config=self.download_config, dynamic_modules_path=self.dynamic_modules_path
-        )
-        module_factory_result = factory.get_module()
-        for offline_mode in OfflineSimulationMode:
-            with offline(offline_mode):
-                factory = CachedMetricModuleFactory(
-                    METRIC_LOADING_SCRIPT_NAME,
-                    dynamic_modules_path=self.dynamic_modules_path,
-                )
-                module_factory_result = factory.get_module()
-                assert importlib.import_module(module_factory_result.module_path) is not None
-
 
 @pytest.mark.parametrize(
     "factory_class",
     [
         CachedDatasetModuleFactory,
-        CachedMetricModuleFactory,
-        GithubMetricModuleFactory,
         HubDatasetModuleFactoryWithoutScript,
         HubDatasetModuleFactoryWithScript,
         LocalDatasetModuleFactoryWithoutScript,
         LocalDatasetModuleFactoryWithScript,
-        LocalMetricModuleFactory,
         PackagedDatasetModuleFactory,
     ],
 )
@@ -964,7 +894,7 @@ class LoadTest(TestCase):
             dummy_code = "MY_DUMMY_VARIABLE = 'hello there'"
             module_dir = self._dummy_module_dir(tmp_dir, "__dummy_module_name1__", dummy_code)
             dataset_module = datasets.load.dataset_module_factory(
-                module_dir, dynamic_modules_path=self.dynamic_modules_path
+                module_dir, dynamic_modules_path=self.dynamic_modules_path, trust_remote_code=True
             )
             dummy_module = importlib.import_module(dataset_module.module_path)
             self.assertEqual(dummy_module.MY_DUMMY_VARIABLE, "hello there")
@@ -974,7 +904,7 @@ class LoadTest(TestCase):
             module_dir = self._dummy_module_dir(tmp_dir, "__dummy_module_name1__", dummy_code)
             module_path = os.path.join(module_dir, "__dummy_module_name1__.py")
             dataset_module = datasets.load.dataset_module_factory(
-                module_path, dynamic_modules_path=self.dynamic_modules_path
+                module_path, dynamic_modules_path=self.dynamic_modules_path, trust_remote_code=True
             )
             dummy_module = importlib.import_module(dataset_module.module_path)
             self.assertEqual(dummy_module.MY_DUMMY_VARIABLE, "general kenobi")
@@ -1007,13 +937,13 @@ class LoadTest(TestCase):
             dummy_code = "MY_DUMMY_VARIABLE = 'hello there'"
             module_dir = self._dummy_module_dir(tmp_dir, "__dummy_module_name2__", dummy_code)
             dataset_module_1 = datasets.load.dataset_module_factory(
-                module_dir, dynamic_modules_path=self.dynamic_modules_path
+                module_dir, dynamic_modules_path=self.dynamic_modules_path, trust_remote_code=True
             )
             time.sleep(0.1)  # make sure there's a difference in the OS update time of the python file
             dummy_code = "MY_DUMMY_VARIABLE = 'general kenobi'"
             module_dir = self._dummy_module_dir(tmp_dir, "__dummy_module_name2__", dummy_code)
             dataset_module_2 = datasets.load.dataset_module_factory(
-                module_dir, dynamic_modules_path=self.dynamic_modules_path
+                module_dir, dynamic_modules_path=self.dynamic_modules_path, trust_remote_code=True
             )
         for offline_simulation_mode in list(OfflineSimulationMode):
             with offline(offline_simulation_mode):
@@ -1048,20 +978,16 @@ class LoadTest(TestCase):
             str(context.exception),
         )
         with self.assertRaises(DatasetNotFoundError) as context:
-            datasets.load_dataset("_dummy", revision="0.0.0")
+            datasets.load_dataset("HuggingFaceFW/fineweb-edu", revision="0.0.0")
         self.assertIn(
-            "Dataset '_dummy' doesn't exist on the Hub",
-            str(context.exception),
-        )
-        self.assertIn(
-            "at revision '0.0.0'",
+            "Revision '0.0.0' doesn't exist for dataset 'HuggingFaceFW/fineweb-edu' on the Hub.",
             str(context.exception),
         )
         for offline_simulation_mode in list(OfflineSimulationMode):
             with offline(offline_simulation_mode):
                 with self.assertRaises(ConnectionError) as context:
                     datasets.load_dataset("_dummy")
-                if offline_simulation_mode != OfflineSimulationMode.HF_DATASETS_OFFLINE_SET_TO_1:
+                if offline_simulation_mode != OfflineSimulationMode.HF_HUB_OFFLINE_SET_TO_1:
                     self.assertIn(
                         "Couldn't reach '_dummy' on the Hub",
                         str(context.exception),
@@ -1129,7 +1055,7 @@ def test_load_dataset_builder_with_metadata_configs_pickable(serializer):
 
 
 def test_load_dataset_builder_for_absolute_script_dir(dataset_loading_script_dir, data_dir):
-    builder = datasets.load_dataset_builder(dataset_loading_script_dir, data_dir=data_dir)
+    builder = datasets.load_dataset_builder(dataset_loading_script_dir, data_dir=data_dir, trust_remote_code=True)
     assert isinstance(builder, DatasetBuilder)
     assert builder.name == DATASET_LOADING_SCRIPT_NAME
     assert builder.dataset_name == DATASET_LOADING_SCRIPT_NAME
@@ -1140,7 +1066,7 @@ def test_load_dataset_builder_for_relative_script_dir(dataset_loading_script_dir
     with set_current_working_directory_to_temp_dir():
         relative_script_dir = DATASET_LOADING_SCRIPT_NAME
         shutil.copytree(dataset_loading_script_dir, relative_script_dir)
-        builder = datasets.load_dataset_builder(relative_script_dir, data_dir=data_dir)
+        builder = datasets.load_dataset_builder(relative_script_dir, data_dir=data_dir, trust_remote_code=True)
         assert isinstance(builder, DatasetBuilder)
         assert builder.name == DATASET_LOADING_SCRIPT_NAME
         assert builder.dataset_name == DATASET_LOADING_SCRIPT_NAME
@@ -1149,7 +1075,9 @@ def test_load_dataset_builder_for_relative_script_dir(dataset_loading_script_dir
 
 def test_load_dataset_builder_for_script_path(dataset_loading_script_dir, data_dir):
     builder = datasets.load_dataset_builder(
-        os.path.join(dataset_loading_script_dir, DATASET_LOADING_SCRIPT_NAME + ".py"), data_dir=data_dir
+        os.path.join(dataset_loading_script_dir, DATASET_LOADING_SCRIPT_NAME + ".py"),
+        data_dir=data_dir,
+        trust_remote_code=True,
     )
     assert isinstance(builder, DatasetBuilder)
     assert builder.name == DATASET_LOADING_SCRIPT_NAME
@@ -1198,7 +1126,7 @@ def test_load_dataset_builder_for_community_dataset_with_script():
 @pytest.mark.integration
 def test_load_dataset_builder_for_community_dataset_with_script_no_parquet_export():
     with patch.object(config, "USE_PARQUET_EXPORT", False):
-        builder = datasets.load_dataset_builder(SAMPLE_DATASET_IDENTIFIER)
+        builder = datasets.load_dataset_builder(SAMPLE_DATASET_IDENTIFIER, trust_remote_code=True)
     assert isinstance(builder, DatasetBuilder)
     assert builder.name == SAMPLE_DATASET_IDENTIFIER.split("/")[-1]
     assert builder.dataset_name == SAMPLE_DATASET_IDENTIFIER.split("/")[-1]
@@ -1241,7 +1169,9 @@ def test_load_dataset_builder_fail():
 @pytest.mark.parametrize("keep_in_memory", [False, True])
 def test_load_dataset_local_script(dataset_loading_script_dir, data_dir, keep_in_memory, caplog):
     with assert_arrow_memory_increases() if keep_in_memory else assert_arrow_memory_doesnt_increase():
-        dataset = load_dataset(dataset_loading_script_dir, data_dir=data_dir, keep_in_memory=keep_in_memory)
+        dataset = load_dataset(
+            dataset_loading_script_dir, data_dir=data_dir, keep_in_memory=keep_in_memory, trust_remote_code=True
+        )
     assert isinstance(dataset, DatasetDict)
     assert all(isinstance(d, Dataset) for d in dataset.values())
     assert len(dataset) == 2
@@ -1249,7 +1179,7 @@ def test_load_dataset_local_script(dataset_loading_script_dir, data_dir, keep_in
 
 
 def test_load_dataset_cached_local_script(dataset_loading_script_dir, data_dir, caplog):
-    dataset = load_dataset(dataset_loading_script_dir, data_dir=data_dir)
+    dataset = load_dataset(dataset_loading_script_dir, data_dir=data_dir, trust_remote_code=True)
     assert isinstance(dataset, DatasetDict)
     assert all(isinstance(d, Dataset) for d in dataset.values())
     assert len(dataset) == 2
@@ -1265,6 +1195,21 @@ def test_load_dataset_cached_local_script(dataset_loading_script_dir, data_dir, 
     with pytest.raises(DatasetNotFoundError) as exc_info:
         datasets.load_dataset(SAMPLE_DATASET_NAME_THAT_DOESNT_EXIST)
     assert f"Dataset '{SAMPLE_DATASET_NAME_THAT_DOESNT_EXIST}' doesn't exist on the Hub" in str(exc_info.value)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "kwargs, expected_train_num_rows, expected_test_num_rows",
+    [
+        ({}, 2, 2),
+        ({"data_dir": "data1"}, 1, 1),  # GH-6918: NonMatchingSplitsSizesError
+        ({"data_files": "data1/train.txt"}, 1, None),  # GH-6939: ExpectedMoreSplits
+    ],
+)
+def test_load_dataset_without_script_from_hub(kwargs, expected_train_num_rows, expected_test_num_rows):
+    dataset = load_dataset(SAMPLE_DATASET_IDENTIFIER3, **kwargs)
+    assert dataset["train"].num_rows == expected_train_num_rows
+    assert (dataset["test"].num_rows == expected_test_num_rows) if expected_test_num_rows else ("test" not in dataset)
 
 
 @pytest.mark.integration
@@ -1289,7 +1234,7 @@ def test_load_dataset_cached_from_hub(stream_from_cache, caplog):
 
 
 def test_load_dataset_streaming(dataset_loading_script_dir, data_dir):
-    dataset = load_dataset(dataset_loading_script_dir, streaming=True, data_dir=data_dir)
+    dataset = load_dataset(dataset_loading_script_dir, streaming=True, data_dir=data_dir, trust_remote_code=True)
     assert isinstance(dataset, IterableDatasetDict)
     assert all(isinstance(d, IterableDataset) for d in dataset.values())
     assert len(dataset) == 2
@@ -1571,7 +1516,9 @@ def test_load_dataset_private_zipped_images(hf_private_dataset_repo_zipped_img_d
 def test_load_dataset_then_move_then_reload(dataset_loading_script_dir, data_dir, tmp_path, caplog):
     cache_dir1 = tmp_path / "cache1"
     cache_dir2 = tmp_path / "cache2"
-    dataset = load_dataset(dataset_loading_script_dir, data_dir=data_dir, split="train", cache_dir=cache_dir1)
+    dataset = load_dataset(
+        dataset_loading_script_dir, data_dir=data_dir, split="train", cache_dir=cache_dir1, trust_remote_code=True
+    )
     fingerprint1 = dataset._fingerprint
     del dataset
     os.rename(cache_dir1, cache_dir2)
@@ -1599,7 +1546,9 @@ def test_load_dataset_builder_then_edit_then_load_again(tmp_path: Path):
 def test_load_dataset_readonly(dataset_loading_script_dir, dataset_loading_script_dir_readonly, data_dir, tmp_path):
     cache_dir1 = tmp_path / "cache1"
     cache_dir2 = tmp_path / "cache2"
-    dataset = load_dataset(dataset_loading_script_dir, data_dir=data_dir, split="train", cache_dir=cache_dir1)
+    dataset = load_dataset(
+        dataset_loading_script_dir, data_dir=data_dir, split="train", cache_dir=cache_dir1, trust_remote_code=True
+    )
     fingerprint1 = dataset._fingerprint
     del dataset
     # Load readonly dataset and check that the fingerprint is the same.
@@ -1622,7 +1571,7 @@ def test_load_dataset_local_with_default_in_memory(
         expected_in_memory = False
 
     with assert_arrow_memory_increases() if expected_in_memory else assert_arrow_memory_doesnt_increase():
-        dataset = load_dataset(dataset_loading_script_dir, data_dir=data_dir)
+        dataset = load_dataset(dataset_loading_script_dir, data_dir=data_dir, trust_remote_code=True)
     assert (dataset["train"].dataset_size < max_in_memory_dataset_size) is expected_in_memory
 
 
@@ -1640,12 +1589,57 @@ def test_load_from_disk_with_default_in_memory(
     else:
         expected_in_memory = False
 
-    dset = load_dataset(dataset_loading_script_dir, data_dir=data_dir, keep_in_memory=True)
-    dataset_path = os.path.join(tmp_path, "saved_dataset")
+    dset = load_dataset(dataset_loading_script_dir, data_dir=data_dir, keep_in_memory=True, trust_remote_code=True)
+    dataset_path = tmp_path / "saved_dataset"
     dset.save_to_disk(dataset_path)
 
     with assert_arrow_memory_increases() if expected_in_memory else assert_arrow_memory_doesnt_increase():
         _ = load_from_disk(dataset_path)
+
+
+@pytest.fixture
+def moto_server(monkeypatch):
+    from moto.server import ThreadedMotoServer
+
+    monkeypatch.setattr(
+        "os.environ",
+        {
+            "AWS_ENDPOINT_URL": "http://localhost:5000",
+            "AWS_DEFAULT_REGION": "us-east-1",
+            "AWS_ACCESS_KEY_ID": "FOO",
+            "AWS_SECRET_ACCESS_KEY": "BAR",
+        },
+    )
+    server = ThreadedMotoServer()
+    server.start()
+    try:
+        yield
+    finally:
+        server.stop()
+
+
+@require_moto
+def test_load_file_from_s3(moto_server):
+    # we need server mode here because of an aiobotocore incompatibility with moto.mock_aws
+    # (https://github.com/getmoto/moto/issues/6836)
+    import boto3
+
+    # Create a mock S3 bucket
+    bucket_name = "test-bucket"
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket=bucket_name)
+
+    # Upload a file to the mock bucket
+    key = "test-file.csv"
+    csv_data = "Island\nIsabela\nBaltra"
+
+    s3.put_object(Bucket=bucket_name, Key=key, Body=csv_data)
+
+    # Load the file from the mock bucket
+    ds = datasets.load_dataset("csv", data_files={"train": "s3://test-bucket/test-file.csv"})
+
+    # Check if the loaded content matches the original content
+    assert list(ds["train"]) == [{"Island": "Isabela"}, {"Island": "Baltra"}]
 
 
 @pytest.mark.integration
@@ -1730,19 +1724,13 @@ def test_load_dataset_without_script_with_zip(zip_csv_path):
     assert ds["train"][0] == {"col_1": 0, "col_2": 0, "col_3": 0.0}
 
 
-@pytest.mark.parametrize("trust_remote_code, expected", [(False, False), (True, True), (None, True)])
-def test_resolve_trust_remote_code(trust_remote_code, expected):
-    assert resolve_trust_remote_code(trust_remote_code, repo_id="dummy") is expected
-
-
 @pytest.mark.parametrize("trust_remote_code, expected", [(False, False), (True, True), (None, ValueError)])
 def test_resolve_trust_remote_code_future(trust_remote_code, expected):
-    with patch.object(config, "HF_DATASETS_TRUST_REMOTE_CODE", None):  # this will be the default soon
-        if isinstance(expected, bool):
-            resolve_trust_remote_code(trust_remote_code, repo_id="dummy") is expected
-        else:
-            with pytest.raises(expected):
-                resolve_trust_remote_code(trust_remote_code, repo_id="dummy")
+    if isinstance(expected, bool):
+        resolve_trust_remote_code(trust_remote_code, repo_id="dummy") is expected
+    else:
+        with pytest.raises(expected):
+            resolve_trust_remote_code(trust_remote_code, repo_id="dummy")
 
 
 @pytest.mark.integration

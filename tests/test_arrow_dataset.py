@@ -57,6 +57,7 @@ from .utils import (
     require_dill_gt_0_3_2,
     require_jax,
     require_not_windows,
+    require_numpy1_on_windows,
     require_pil,
     require_polars,
     require_pyspark,
@@ -420,6 +421,7 @@ class BaseDatasetTest(TestCase):
                 self.assertIsInstance(dset[0]["col_2"], np.str_)
                 self.assertEqual(dset[0]["col_2"].item(), "a")
 
+    @require_numpy1_on_windows
     @require_torch
     def test_set_format_torch(self, in_memory):
         import torch
@@ -1525,6 +1527,7 @@ class BaseDatasetTest(TestCase):
             with self._create_dummy_dataset(in_memory, tmp_dir) as dset:
                 self.assertRaises(ValueError, dset.map, func_return_multi_row_pd_dataframe)
 
+    @require_numpy1_on_windows
     @require_torch
     def test_map_torch(self, in_memory):
         import torch
@@ -1590,6 +1593,7 @@ class BaseDatasetTest(TestCase):
                     )
                     self.assertListEqual(dset_test[0]["tensor"], [1, 2, 3])
 
+    @require_numpy1_on_windows
     @require_torch
     def test_map_tensor_batched(self, in_memory):
         import torch
@@ -3867,10 +3871,11 @@ def data_generator():
     return _gen
 
 
-def _check_generator_dataset(dataset, expected_features):
+def _check_generator_dataset(dataset, expected_features, split):
     assert isinstance(dataset, Dataset)
     assert dataset.num_rows == 4
     assert dataset.num_columns == 3
+    assert dataset.split == split
     assert dataset.column_names == ["col_1", "col_2", "col_3"]
     for feature, expected_dtype in expected_features.items():
         assert dataset.features[feature].dtype == expected_dtype
@@ -3882,7 +3887,7 @@ def test_dataset_from_generator_keep_in_memory(keep_in_memory, data_generator, t
     expected_features = {"col_1": "string", "col_2": "int64", "col_3": "float64"}
     with assert_arrow_memory_increases() if keep_in_memory else assert_arrow_memory_doesnt_increase():
         dataset = Dataset.from_generator(data_generator, cache_dir=cache_dir, keep_in_memory=keep_in_memory)
-    _check_generator_dataset(dataset, expected_features)
+    _check_generator_dataset(dataset, expected_features, NamedSplit("train"))
 
 
 @pytest.mark.parametrize(
@@ -3903,7 +3908,23 @@ def test_dataset_from_generator_features(features, data_generator, tmp_path):
         Features({feature: Value(dtype) for feature, dtype in features.items()}) if features is not None else None
     )
     dataset = Dataset.from_generator(data_generator, features=features, cache_dir=cache_dir)
-    _check_generator_dataset(dataset, expected_features)
+    _check_generator_dataset(dataset, expected_features, NamedSplit("train"))
+
+
+@pytest.mark.parametrize(
+    "split",
+    [None, NamedSplit("train"), "train", NamedSplit("foo"), "foo"],
+)
+def test_dataset_from_generator_split(split, data_generator, tmp_path):
+    cache_dir = tmp_path / "cache"
+    default_expected_split = "train"
+    expected_features = {"col_1": "string", "col_2": "int64", "col_3": "float64"}
+    expected_split = split if split else default_expected_split
+    if split:
+        dataset = Dataset.from_generator(data_generator, cache_dir=cache_dir, split=split)
+    else:
+        dataset = Dataset.from_generator(data_generator, cache_dir=cache_dir)
+    _check_generator_dataset(dataset, expected_features, expected_split)
 
 
 @require_not_windows
@@ -4098,7 +4119,7 @@ def test_dummy_dataset_serialize_fs(dataset, mockfs):
     dataset.save_to_disk(dataset_path, storage_options=mockfs.storage_options)
     assert mockfs.isdir(dataset_path)
     assert mockfs.glob(dataset_path + "/*")
-    reloaded = dataset.load_from_disk(dataset_path, storage_options=mockfs.storage_options)
+    reloaded = Dataset.load_from_disk(dataset_path, storage_options=mockfs.storage_options)
     assert len(reloaded) == len(dataset)
     assert reloaded.features == dataset.features
     assert reloaded.to_dict() == dataset.to_dict()
@@ -4826,3 +4847,72 @@ def test_dataset_getitem_raises():
         ds[False]
     with pytest.raises(TypeError):
         ds._getitem(True)
+
+
+def test_categorical_dataset(tmpdir):
+    n_legs = pa.array([2, 4, 5, 100])
+    animals = pa.array(["Flamingo", "Horse", "Brittle stars", "Centipede"]).cast(
+        pa.dictionary(pa.int32(), pa.string())
+    )
+    names = ["n_legs", "animals"]
+
+    table = pa.Table.from_arrays([n_legs, animals], names=names)
+    table_path = str(tmpdir / "data.parquet")
+    pa.parquet.write_table(table, table_path)
+
+    dataset = Dataset.from_parquet(table_path)
+    entry = dataset[0]
+
+    # Categorical types get transparently converted to string
+    assert entry["animals"] == "Flamingo"
+
+
+def test_dataset_batch():
+    # Create a simple Dataset
+    data = {"id": list(range(10)), "text": [f"Text {i}" for i in range(10)]}
+    ds = Dataset.from_dict(data)
+
+    # Test with batch_size=3, drop_last_batch=False
+    batched_ds = ds.batch(batch_size=3, drop_last_batch=False)
+    batches = list(batched_ds)
+
+    assert len(batches) == 4  # 3 full batches and 1 partial batch
+    for i, batch in enumerate(batches[:3]):  # Check full batches
+        assert len(batch["id"]) == 3
+        assert len(batch["text"]) == 3
+        assert batch["id"] == [3 * i, 3 * i + 1, 3 * i + 2]
+        assert batch["text"] == [f"Text {3*i}", f"Text {3*i+1}", f"Text {3*i+2}"]
+
+    # Check last partial batch
+    assert len(batches[3]["id"]) == 1
+    assert len(batches[3]["text"]) == 1
+    assert batches[3]["id"] == [9]
+    assert batches[3]["text"] == ["Text 9"]
+
+    # Test with batch_size=3, drop_last_batch=True
+    batched_ds = ds.batch(batch_size=3, drop_last_batch=True)
+    batches = list(batched_ds)
+
+    assert len(batches) == 3  # Only full batches
+    for i, batch in enumerate(batches):
+        assert len(batch["id"]) == 3
+        assert len(batch["text"]) == 3
+        assert batch["id"] == [3 * i, 3 * i + 1, 3 * i + 2]
+        assert batch["text"] == [f"Text {3*i}", f"Text {3*i+1}", f"Text {3*i+2}"]
+
+    # Test with batch_size=4 (doesn't evenly divide dataset size)
+    batched_ds = ds.batch(batch_size=4, drop_last_batch=False)
+    batches = list(batched_ds)
+
+    assert len(batches) == 3  # 2 full batches and 1 partial batch
+    for i, batch in enumerate(batches[:2]):  # Check full batches
+        assert len(batch["id"]) == 4
+        assert len(batch["text"]) == 4
+        assert batch["id"] == [4 * i, 4 * i + 1, 4 * i + 2, 4 * i + 3]
+        assert batch["text"] == [f"Text {4*i}", f"Text {4*i+1}", f"Text {4*i+2}", f"Text {4*i+3}"]
+
+    # Check last partial batch
+    assert len(batches[2]["id"]) == 2
+    assert len(batches[2]["text"]) == 2
+    assert batches[2]["id"] == [8, 9]
+    assert batches[2]["text"] == ["Text 8", "Text 9"]

@@ -318,6 +318,44 @@ You can filter rows in the dataset based on a predicate function using [`Dataset
  {'id': 4, 'text': 'Are you looking for Number the Stars (Essential Modern Classics)? Normally, ...'}]
 ```
 
+## Batch
+
+The `batch` method transforms your `IterableDataset` into an iterable of batches. This is particularly useful when you want to work with batches in your training loop or when using frameworks that expect batched inputs.
+
+<Tip>
+
+There is also a "Batch Processing" option when using the `map` function to apply a function to batches of data, which is discussed in the [Map section](#map) above. The `batch` method described here is different and provides a more direct way to create batches from your dataset.
+
+</Tip>
+
+You can use the `batch` method like this:
+
+```python
+from datasets import load_dataset
+
+# Load a dataset in streaming mode
+dataset = load_dataset("some_dataset", split="train", streaming=True)
+
+# Create batches of 32 samples
+batched_dataset = dataset.batch(batch_size=32)
+
+# Iterate over the batched dataset
+for batch in batched_dataset:
+    print(batch)
+    break
+```
+
+In this example, batched_dataset is still an IterableDataset, but each item yielded is now a batch of 32 samples instead of a single sample.
+This batching is done on-the-fly as you iterate over the dataset, preserving the memory-efficient nature of IterableDataset.
+
+The batch method also provides a drop_last_batch parameter. 
+When set to True, it will discard the last batch if it's smaller than the specified batch_size. 
+This can be useful in scenarios where your downstream processing requires all batches to be of the same size:
+
+```python
+batched_dataset = dataset.batch(batch_size=32, drop_last_batch=True)
+```
+
 ## Stream in a training loop
 
 [`IterableDataset`] can be integrated into a training loop. First, shuffle the dataset:
@@ -360,3 +398,61 @@ Lastly, create a simple training loop and start training:
 </frameworkcontent>
 
 <!-- TODO: Write the TF content! -->
+
+### Save a dataset checkpoint and resume iteration
+
+If your training loop stops, you may want to restart the training from where it was. To do so you can save a checkpoint of your model and optimizers, as well as your data loader.
+
+Iterable datasets don't provide random access to a specific example index to resume from, but you can use [`IterableDataset.state_dict`] and [`IterableDataset.load_state_dict`] to resume from a checkpoint instead, similarly to what you can do for models and optimizers:
+
+```python
+>>> iterable_dataset = Dataset.from_dict({"a": range(6)}).to_iterable_dataset(num_shards=3)
+>>> for idx, example in enumerate(iterable_dataset):
+...     print(example)
+...     if idx == 2:
+...         state_dict = iterable_dataset.state_dict()
+...         print("checkpoint")
+...         break
+>>> iterable_dataset.load_state_dict(state_dict)
+>>> print(f"restart from checkpoint")
+>>> for example in iterable_dataset:
+...     print(example)
+```
+
+Returns:
+
+```
+{'a': 0}
+{'a': 1}
+{'a': 2}
+checkpoint
+restart from checkpoint
+{'a': 3}
+{'a': 4}
+{'a': 5}
+```
+
+Under the hood, the iterable dataset keeps track of the current shard being read and the example index in the current shard and it stores this info in the `state_dict`.
+
+To resume from a checkpoint, the dataset skips all the shards that were previously read to restart from the current shard. 
+Then it reads the shard and skips examples until it reaches the exact example from the checkpoint.
+
+Therefore restarting a dataset is quite fast, since it will not re-read the shards that have already been iterated on. Still, resuming a dataset is generally not instantaneous since it has to restart reading from the beginning of the current shard and skip examples until it reaches the checkpoint location.
+
+This can be used with the `StatefulDataLoader` from `torchdata`:
+
+```python
+>>> from torchdata.stateful_dataloader import StatefulDataLoader
+>>> iterable_dataset = load_dataset("deepmind/code_contests", streaming=True, split="train")
+>>> dataloader = StatefulDataLoader(iterable_dataset, batch_size=32, num_workers=4)
+>>> # checkpoint
+>>> state_dict = dataloader.state_dict()  # uses iterable_dataset.state_dict() under the hood
+>>> # resume from checkpoint
+>>> dataloader.load_state_dict(state_dict)  # uses iterable_dataset.load_state_dict() under the hood
+```
+
+<Tip>
+
+Resuming returns exactly where the checkpoint was saved except if `.shuffle()` is used: examples from shuffle buffers are lost when resuming and the buffers are refilled with new data.
+
+</Tip>

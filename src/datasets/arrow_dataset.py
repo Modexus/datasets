@@ -711,6 +711,11 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                     f"{e}\nThe 'source' features come from dataset_info.json, and the 'target' ones are those of the dataset arrow file."
                 )
 
+        # In case there are types like pa.dictionary that we need to convert to the underlying type
+
+        if self.data.schema != self.info.features.arrow_schema:
+            self._data = self.data.cast(self.info.features.arrow_schema)
+
         # Infer fingerprint if None
 
         if self._fingerprint is None:
@@ -1063,6 +1068,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         keep_in_memory: bool = False,
         gen_kwargs: Optional[dict] = None,
         num_proc: Optional[int] = None,
+        split: NamedSplit = Split.TRAIN,
         **kwargs,
     ):
         """Create a Dataset from a generator.
@@ -1085,6 +1091,10 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                 If `num_proc` is greater than one, then all list values in `gen_kwargs` must be the same length. These values will be split between calls to the generator. The number of shards will be the minimum of the shortest list in `gen_kwargs` and `num_proc`.
 
                 <Added version="2.7.0"/>
+            split ([`NamedSplit`], defaults to `Split.TRAIN`):
+                Split name to be assigned to the dataset.
+
+                <Added version="2.21.0"/>
             **kwargs (additional keyword arguments):
                 Keyword arguments to be passed to :[`GeneratorConfig`].
 
@@ -1121,6 +1131,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
             keep_in_memory=keep_in_memory,
             gen_kwargs=gen_kwargs,
             num_proc=num_proc,
+            split=split,
             **kwargs,
         ).read()
 
@@ -1449,7 +1460,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         If you want to store paths or urls, please use the Value("string") type.
 
         Args:
-            dataset_path (`str`):
+            dataset_path (`path-like`):
                 Path (e.g. `dataset/train`) or remote URI (e.g. `s3://my-bucket/dataset/train`)
                 of the dataset directory where the dataset will be saved to.
             fs (`fsspec.spec.AbstractFileSystem`, *optional*):
@@ -1649,7 +1660,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
 
     @staticmethod
     def load_from_disk(
-        dataset_path: str,
+        dataset_path: PathLike,
         fs="deprecated",
         keep_in_memory: Optional[bool] = None,
         storage_options: Optional[dict] = None,
@@ -1659,7 +1670,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         filesystem using any implementation of `fsspec.spec.AbstractFileSystem`.
 
         Args:
-            dataset_path (`str`):
+            dataset_path (`path-like`):
                 Path (e.g. `"dataset/train"`) or remote URI (e.g. `"s3//my-bucket/dataset/train"`)
                 of the dataset directory where the dataset will be loaded from.
             fs (`fsspec.spec.AbstractFileSystem`, *optional*):
@@ -3607,6 +3618,57 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
             yield rank, True, shard
 
     @transmit_format
+    @fingerprint_transform(inplace=False)
+    def batch(
+        self,
+        batch_size: int,
+        drop_last_batch: bool = False,
+        num_proc: Optional[int] = None,
+        new_fingerprint: Optional[str] = None,
+    ) -> "Dataset":
+        """
+        Group samples from the dataset into batches.
+
+        Args:
+            batch_size (`int`):
+                The number of samples in each batch.
+            drop_last_batch (`bool`, defaults to `False`):
+                Whether to drop the last incomplete batch.
+            num_proc (`int`, *optional*, defaults to `None`):
+                Max number of processes when generating cache. Already cached shards are loaded sequentially.
+            new_fingerprint (`str`, *optional*, defaults to `None`):
+                The new fingerprint of the dataset after transform.
+                If `None`, the new fingerprint is computed using a hash of the previous fingerprint, and the transform arguments.
+
+        Returns:
+            [`Dataset`]: A new Dataset where each item is a batch of multiple samples from the original dataset.
+
+        Example:
+
+        ```py
+        >>> from datasets import load_dataset
+        >>> ds = load_dataset("rotten_tomatoes", split="train")
+        >>> batched_ds = ds.batch(batch_size=4)
+        >>> batched_ds[0]
+        {'text': ['compassionately explores the seemingly irreconcilable situation...', ...],  # 4 items
+        'label': [1, 1, 1, 1]}
+        ```
+        """
+
+        def batch_fn(example):
+            return {k: [v] for k, v in example.items()}
+
+        return self.map(
+            batch_fn,
+            batched=True,
+            batch_size=batch_size,
+            drop_last_batch=drop_last_batch,
+            num_proc=num_proc,
+            new_fingerprint=new_fingerprint,
+            desc="Batching examples",
+        )
+
+    @transmit_format
     @fingerprint_transform(
         inplace=False, ignore_kwargs=["load_from_cache_file", "cache_file_name", "desc"], version="2.0.1"
     )
@@ -4984,6 +5046,9 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
     ) -> int:
         """Export the dataset to JSON Lines or JSON.
 
+        The default output format is [JSON Lines](https://jsonlines.org/).
+        To export to [JSON](https://www.json.org), pass `lines=False` argument and the desired `orient`.
+
         Args:
             path_or_buf (`PathLike` or `FileOrBuffer`):
                 Either a path to a file (e.g. `file.json`), a remote URI (e.g. `hf://datasets/username/my_dataset_name/data.json`),
@@ -4992,7 +5057,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                 Size of the batch to load in memory and write at once.
                 Defaults to `datasets.config.DEFAULT_MAX_BATCH_SIZE`.
             num_proc (`int`, *optional*):
-                Number of processes for multiprocessing. By default it doesn't
+                Number of processes for multiprocessing. By default, it doesn't
                 use multiprocessing. `batch_size` in this case defaults to
                 `datasets.config.DEFAULT_MAX_BATCH_SIZE` but feel free to make it 5x or 10x of the default
                 value if you have sufficient compute power.
@@ -5002,10 +5067,11 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
                 <Added version="2.19.0"/>
             **to_json_kwargs (additional keyword arguments):
                 Parameters to pass to pandas's [`pandas.DataFrame.to_json`](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.to_json.html).
+                Default arguments are `lines=True` and `orient="records".
 
                 <Changed version="2.11.0">
 
-                Now, `index` defaults to `False` if `orient` is `"split"` or `"table"`.
+                The parameter `index` defaults to `False` if `orient` is `"split"` or `"table"`.
 
                 If you would like to write the index, pass `index=True`.
 
@@ -5017,7 +5083,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         Example:
 
         ```py
-        >>> ds.to_json("path/to/dataset/directory")
+        >>> ds.to_json("path/to/dataset/directory/filename.jsonl")
         ```
         """
         # Dynamic import to avoid circular dependency
@@ -5611,7 +5677,8 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         )
         repo_id = repo_url.repo_id
 
-        if revision is not None:
+        if revision is not None and not revision.startswith("refs/pr/"):
+            # We do not call create_branch for a PR reference: 400 Bad Request
             api.create_branch(repo_id, branch=revision, token=token, repo_type="dataset", exist_ok=True)
 
         if not data_dir:
