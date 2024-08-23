@@ -111,7 +111,7 @@ REQUIRED_PKGS = [
     # For file locking
     "filelock",
     # We use numpy>=1.17 to have np.random.Generator (Dataset shuffling)
-    "numpy>=1.17,<2.1",  # Temporarily pin <2.1 (see GH-7111)
+    "numpy>=1.17",
     # Backend and serialization.
     # Minimum 15.0.0 to be able to cast dictionary types to their underlying types
     "pyarrow>=15.0.0",
@@ -133,7 +133,7 @@ REQUIRED_PKGS = [
     # for data streaming via http
     "aiohttp",
     # To get datasets from the Datasets Hub on huggingface.co
-    "huggingface-hub>=0.21.2",
+    "huggingface-hub>=0.22.0",
     # Utilities from PyPA to e.g., compare versions
     "packaging",
     # To parse YAML metadata from dataset cards
@@ -194,8 +194,8 @@ TESTS_REQUIRE.extend(AUDIO_REQUIRE)
 
 NUMPY2_INCOMPATIBLE_LIBRARIES = [
     "faiss-cpu",
+    "librosa",  # librosa -> numba-0.60.0 requires numpy < 2.1 (see GH-7111)
     "tensorflow",
-    "transformers",
 ]
 TESTS_NUMPY2_REQUIRE = [
     library for library in TESTS_REQUIRE if library.partition(">")[0] not in NUMPY2_INCOMPATIBLE_LIBRARIES
