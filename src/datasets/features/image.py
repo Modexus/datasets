@@ -241,8 +241,6 @@ class Image:
                 path_array = pa.array([None] * len(storage), type=pa.string())
             storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=storage.is_null())
         elif pa.types.is_list(storage.type):
-            from .features import Array2DExtensionType, Array3DExtensionType
-
             arrays = []
             for i, is_null in enumerate(storage.is_null()):
                 if not is_null.as_py():
@@ -250,12 +248,11 @@ class Image:
                     shape = get_shapes_from_listarray(storage_part)
                     dtype = get_dtypes_from_listarray(storage_part)
 
-                    if len(shape) == 2:
-                        extension_type = Array2DExtensionType(shape=shape, dtype=str(dtype))
-                    else:
-                        extension_type = Array3DExtensionType(shape=shape, dtype=str(dtype))
-                    array = pa.ExtensionArray.from_storage(extension_type, storage_part)
-                    arrays.append(array.to_numpy().squeeze(0))
+                    tensor_type = pa.fixed_shape_tensor(dtype, shape)
+                    array = pa.array(
+                        [storage_part.flatten(recursive=True).tolist()], type=tensor_type
+                    ).to_numpy_ndarray()[0]
+                    arrays.append(array)
                 else:
                     arrays.append(None)
 

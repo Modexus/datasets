@@ -32,6 +32,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.types
+import torch
 from pandas.api.extensions import ExtensionArray as PandasExtensionArray
 from pandas.api.extensions import ExtensionDtype as PandasExtensionDtype
 
@@ -110,6 +111,8 @@ def _arrow_to_datasets_dtype(arrow_type: pa.DataType) -> str:
         return "large_string"
     elif pyarrow.types.is_dictionary(arrow_type):
         return _arrow_to_datasets_dtype(arrow_type.value_type)
+    elif isinstance(arrow_type, pa.FixedShapeTensorType):
+        return "FixedShapeTensorType"
     else:
         raise ValueError(f"Arrow type {arrow_type} does not have a datasets dtype equivalent.")
 
@@ -538,11 +541,19 @@ class _ArrayXD:
         self.shape = tuple(self.shape)
 
     def __call__(self):
-        pa_type = globals()[self.__class__.__name__ + "ExtensionType"](self.shape, self.dtype)
-        return pa_type
+        return pa.fixed_shape_tensor(string_to_arrow(self.dtype), self.shape)
 
     def encode_example(self, value):
         return value
+
+    def cast_storage(self, storage: pa.Array) -> pa.Array:
+        if pa.types.is_fixed_size_list(storage.type):
+            return pa.ExtensionArray.from_storage(self(), storage)
+
+        tensor_type = self()
+        tensor_wrapper_type = pa.fixed_shape_tensor(tensor_type.value_type, (len(storage), *tensor_type.shape))
+        fs = pa.array([storage.flatten(recursive=True).tolist()], type=tensor_wrapper_type)
+        return pa.FixedShapeTensorArray.from_numpy_ndarray(fs.to_numpy_ndarray()[0])
 
 
 @dataclass
@@ -705,13 +716,6 @@ class Array4DExtensionType(_ArrayXDExtensionType):
 
 class Array5DExtensionType(_ArrayXDExtensionType):
     ndims = 5
-
-
-# Register the extension types for deserialization
-pa.register_extension_type(Array2DExtensionType((1, 2), "int64"))
-pa.register_extension_type(Array3DExtensionType((1, 2, 3), "int64"))
-pa.register_extension_type(Array4DExtensionType((1, 2, 3, 4), "int64"))
-pa.register_extension_type(Array5DExtensionType((1, 2, 3, 4, 5), "int64"))
 
 
 def _is_zero_copy_only(pa_type: pa.DataType, unnest: bool = False) -> bool:
@@ -936,7 +940,7 @@ class PandasArrayExtensionArray(PandasExtensionArray):
 
 
 def pandas_types_mapper(dtype):
-    if isinstance(dtype, _ArrayXDExtensionType):
+    if isinstance(dtype, _ArrayXD):
         return PandasArrayExtensionDtype(dtype.value_type)
 
 
@@ -1498,6 +1502,9 @@ def generate_from_arrow_type(pa_type: pa.DataType) -> FeatureType:
     elif isinstance(pa_type, _ArrayXDExtensionType):
         array_feature = [None, None, Array2D, Array3D, Array4D, Array5D][pa_type.ndims]
         return array_feature(shape=pa_type.shape, dtype=pa_type.value_type)
+    elif isinstance(pa_type, pa.FixedShapeTensorType):
+        array_feature = [None, None, Array2D, Array3D, Array4D, Array5D][len(pa_type.shape)]
+        return array_feature(shape=pa_type.shape, dtype=generate_from_arrow_type(pa_type.value_type).dtype)
     elif isinstance(pa_type, pa.DataType):
         return Value(dtype=_arrow_to_datasets_dtype(pa_type))
     else:
@@ -1506,6 +1513,10 @@ def generate_from_arrow_type(pa_type: pa.DataType) -> FeatureType:
 
 def numpy_to_pyarrow_listarray(arr: np.ndarray, type: pa.DataType = None) -> pa.ListArray:
     """Build a PyArrow ListArray from a multidimensional NumPy array"""
+    if isinstance(arr, np.ndarray):
+        return pa.FixedShapeTensorArray.from_numpy_ndarray(np.asarray(arr))
+    return pa.FixedShapeTensorArray.from_numpy_ndarray(arr.numpy(force=True))
+
     arr = np.array(arr)
     values = pa.array(arr.flatten(), type=type)
     for i in range(arr.ndim - 1):
@@ -1572,12 +1583,12 @@ def any_np_array_to_pyarrow_listarray(data: Union[np.ndarray, List], type: pa.Da
         return list_of_pa_arrays_to_pyarrow_listarray([any_np_array_to_pyarrow_listarray(i, type=type) for i in data])
 
 
-def to_pyarrow_listarray(data: Any, pa_type: _ArrayXDExtensionType) -> pa.Array:
+def to_pyarrow_listarray(data: Any, pa_type: _ArrayXD) -> pa.Array:
     """Convert to PyArrow ListArray.
 
     Args:
         data (Any): Sequence, iterable, np.ndarray or pd.Series.
-        pa_type (_ArrayXDExtensionType): Any of the ArrayNDExtensionType.
+        pa_type (_ArrayXD): Any of the ArrayNDTypes.
 
     Returns:
         pyarrow.Array

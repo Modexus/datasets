@@ -21,6 +21,7 @@ import fsspec
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import torch
 from fsspec.core import url_to_fs
 
 from . import config
@@ -179,9 +180,13 @@ class TypedSequence:
                 return pa.ExtensionArray.from_storage(pa_type, storage)
 
             # efficient np array to pyarrow array
-            if isinstance(data, np.ndarray):
+            if isinstance(data, np.ndarray | torch.Tensor):
                 out = numpy_to_pyarrow_listarray(data)
-            elif isinstance(data, list) and data and isinstance(first_non_null_value(data)[1], np.ndarray):
+            elif (
+                isinstance(data, list)
+                and data
+                and isinstance(first_non_null_value(data)[1], np.ndarray | torch.Tensor)
+            ):
                 out = list_of_np_array_to_pyarrow_listarray(data)
             else:
                 trying_cast_to_python_objects = True

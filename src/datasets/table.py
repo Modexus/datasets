@@ -1915,6 +1915,10 @@ def array_cast(
             # Merge offsets with the null bitmap to avoid the "Null bitmap with offsets slice not supported" ArrowNotImplementedError
             array_offsets = _combine_list_array_offsets_with_mask(array)
             return pa.LargeListArray.from_arrays(array_offsets, _c(array.values, pa_type.value_type))
+        elif isinstance(pa_type, pa.FixedShapeTensorType):
+            tensor_type = pa.fixed_shape_tensor(pa_type.value_type, (len(array), *pa_type.shape))
+            fs = pa.array([array.flatten(recursive=True).tolist()], type=tensor_type)
+            return pa.FixedShapeTensorArray.from_numpy_ndarray(fs.to_numpy_ndarray()[0])
     elif pa.types.is_fixed_size_list(array.type):
         if pa.types.is_fixed_size_list(pa_type):
             if pa_type.list_size == array.type.list_size:
@@ -2061,7 +2065,12 @@ def cast_array_to_feature(
                         return pa.FixedSizeListArray.from_arrays(_c(array_values, feature.feature), feature.length)
             else:
                 casted_array_values = _c(array.values, feature.feature)
-                if pa.types.is_list(array.type) and casted_array_values.type == array.values.type:
+                if (
+                    not isinstance(array.type, pa.FixedShapeTensorType)
+                    and not isinstance(array.type.value_type, pa.FixedShapeTensorType)
+                    and pa.types.is_list(array.type)
+                    and casted_array_values.type == array.values.type
+                ):
                     # Both array and feature have equal list type and values (within the list) type
                     return array
                 else:

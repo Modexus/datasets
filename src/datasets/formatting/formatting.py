@@ -26,7 +26,12 @@ from packaging import version
 
 from .. import config
 from ..features import Features
-from ..features.features import _ArrayXDExtensionType, _is_zero_copy_only, decode_nested_example, pandas_types_mapper
+from ..features.features import (
+    _ArrayXD,
+    _is_zero_copy_only,
+    decode_nested_example,
+    pandas_types_mapper,
+)
 from ..table import Table
 from ..utils.py_utils import no_op_if_value_is_null
 
@@ -166,12 +171,12 @@ class NumpyArrowExtractor(BaseArrowExtractor[dict, np.ndarray, dict]):
 
     def _arrow_array_to_numpy(self, pa_array: pa.Array) -> np.ndarray:
         if isinstance(pa_array, pa.ChunkedArray):
-            if isinstance(pa_array.type, _ArrayXDExtensionType):
-                # don't call to_pylist() to preserve dtype of the fixed-size array
-                zero_copy_only = _is_zero_copy_only(pa_array.type.storage_dtype, unnest=True)
-                array: List = [
-                    row for chunk in pa_array.chunks for row in chunk.to_numpy(zero_copy_only=zero_copy_only)
-                ]
+            if isinstance(pa_array.type, pa.FixedShapeTensorType):
+                array: List = [row for chunk in pa_array.chunks for row in chunk.to_numpy_ndarray()]
+            elif hasattr(pa_array.type, "value_type") and isinstance(
+                pa_array.type.value_type, pa.FixedShapeTensorType
+            ):
+                return [row.values.to_numpy_ndarray() for chunk in pa_array.chunks for row in chunk]
             else:
                 zero_copy_only = _is_zero_copy_only(pa_array.type) and all(
                     not _is_array_with_nulls(chunk) for chunk in pa_array.chunks
@@ -180,7 +185,7 @@ class NumpyArrowExtractor(BaseArrowExtractor[dict, np.ndarray, dict]):
                     row for chunk in pa_array.chunks for row in chunk.to_numpy(zero_copy_only=zero_copy_only)
                 ]
         else:
-            if isinstance(pa_array.type, _ArrayXDExtensionType):
+            if isinstance(pa_array.type, _ArrayXD):
                 # don't call to_pylist() to preserve dtype of the fixed-size array
                 zero_copy_only = _is_zero_copy_only(pa_array.type.storage_dtype, unnest=True)
                 array: List = pa_array.to_numpy(zero_copy_only=zero_copy_only)
@@ -604,8 +609,8 @@ def format_table(
     key: Union[int, slice, range, str, Iterable],
     formatter: Formatter,
     format_columns: Optional[list] = None,
-    output_all_columns=False,
-):
+    output_all_columns: bool = False,
+) -> pa.Table:
     """
     Format a Table depending on the key that was used and a Formatter object.
 
@@ -633,6 +638,7 @@ def format_table(
         pa_table = table.table
     else:
         pa_table = table
+
     query_type = key_to_query_type(key)
     python_formatter = PythonFormatter(features=formatter.features)
     if format_columns is None:
