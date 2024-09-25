@@ -557,6 +557,31 @@ class _ArrayXD:
 
 
 @dataclass
+class Array1D(_ArrayXD):
+    """Create a one-dimensional array.
+
+    Args:
+        shape (`tuple`):
+            Size of each dimension.
+        dtype (`str`):
+            Name of the data type.
+
+    Example:
+
+    ```py
+    >>> from datasets import Features
+    >>> features = Features({'x': Array1D(shape=(3,), dtype='int32')})
+    ```
+    """
+
+    shape: tuple
+    dtype: str
+    id: Optional[str] = None
+    # Automatically constructed
+    _type: str = field(default="Array1D", init=False, repr=False)
+
+
+@dataclass
 class Array2D(_ArrayXD):
     """Create a two-dimensional array.
 
@@ -1501,7 +1526,7 @@ def generate_from_arrow_type(pa_type: pa.DataType) -> FeatureType:
         array_feature = [None, None, Array2D, Array3D, Array4D, Array5D][pa_type.ndims]
         return array_feature(shape=pa_type.shape, dtype=pa_type.value_type)
     elif isinstance(pa_type, pa.FixedShapeTensorType):
-        array_feature = [None, None, Array2D, Array3D, Array4D, Array5D][len(pa_type.shape)]
+        array_feature = [None, Array1D, Array2D, Array3D, Array4D, Array5D][len(pa_type.shape)]
         return array_feature(shape=pa_type.shape, dtype=generate_from_arrow_type(pa_type.value_type).dtype)
     elif isinstance(pa_type, pa.DataType):
         return Value(dtype=_arrow_to_datasets_dtype(pa_type))
